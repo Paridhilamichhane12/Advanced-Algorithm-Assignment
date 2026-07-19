@@ -226,5 +226,5 @@ if __name__ == "__main__":
 
     output_filename = "task4_mdbpp_dual_panel_evaluation.png"
     plt.savefig(output_filename, bbox_inches='tight')
-    print(f"🎉 Success! High-fidelity dual-panel line graph saved as: '{output_filename}'")
+    print(f" Success! High-fidelity dual-panel line graph saved as: '{output_filename}'")
     plt.show()

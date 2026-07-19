@@ -191,7 +191,7 @@ def run_benchmark_pipeline():
     # Save chart layout artifact file straight to current directory
     output_filename = "task2_comprehensive_benchmarks.png"
     plt.savefig(output_filename, dpi=300, bbox_inches='tight')
-    print(f"🎉 Success! High-resolution output graph saved locally as: '{output_filename}'")
+    print(f" Success! High-resolution output graph saved locally as: '{output_filename}'")
     plt.show()
 
 if __name__ == "__main__":
