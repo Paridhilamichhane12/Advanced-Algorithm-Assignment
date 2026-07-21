@@ -1,19 +1,3 @@
-"""
-ST5003CEM - Advanced Algorithms - Task 1: Advanced Data Structures
-Corrected, single-file implementation: BST, AVL Tree, Min-Heap, Hash Table.
-
-Fixes applied vs. the earlier version:
-  1. City is keyed on a numeric city_id (not name) -> correct ordering.
-  2. BST insert/search/delete are iterative -> no RecursionError on
-     worst-case (sorted) input, and faster than recursion.
-  3. AVL insert/delete verified against the numeric key; rotations
-     compare city_id, not city.name.
-  4. Insert, Search AND Delete are all benchmarked (previous version
-     only benchmarked insertion).
-  5. Empirical testing at n = 100, 1,000, 10,000 as required by the brief,
-     with per-operation timings and comparison graphs.
-"""
-
 import sys
 import time
 import random
