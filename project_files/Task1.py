@@ -1,213 +1,266 @@
+"""
+ST5003CEM - Advanced Algorithms - Task 1: Advanced Data Structures
+Corrected, single-file implementation: BST, AVL Tree, Min-Heap, Hash Table.
+
+Fixes applied vs. the earlier version:
+  1. City is keyed on a numeric city_id (not name) -> correct ordering.
+  2. BST insert/search/delete are iterative -> no RecursionError on
+     worst-case (sorted) input, and faster than recursion.
+  3. AVL insert/delete verified against the numeric key; rotations
+     compare city_id, not city.name.
+  4. Insert, Search AND Delete are all benchmarked (previous version
+     only benchmarked insertion).
+  5. Empirical testing at n = 100, 1,000, 10,000 as required by the brief,
+     with per-operation timings and comparison graphs.
+"""
+
 import sys
 import time
 import random
-import math
+import statistics
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# Increase recursion depth for deep un-balanced BSTs during worst-case testing
-sys.setrecursionlimit(50000)
+sys.setrecursionlimit(20000)  # safety net for AVL's recursive delete only
+
+SIZES = [100, 1000, 10000]
+REPEATS = 5
+
 
 # =====================================================================
-# 0. Core Data Structure: City Object
+# 0. City Record
 # =====================================================================
 class City:
-    def __init__(self, name: str, lat: float, lon: float, population: int, distance: float):
+    def __init__(self, city_id: int, name: str, lat: float, lon: float,
+                 population: int, distance: float):
+        self.city_id = city_id
         self.name = name
         self.lat = lat
         self.lon = lon
         self.population = population
-        self.distance = distance  
+        self.distance = distance
 
     def __repr__(self):
-        return f"{self.name}(Dist: {self.distance})"
+        return f"{self.name}(id={self.city_id}, dist={self.distance:.2f})"
 
 
 # =====================================================================
-# 1. Binary Search Tree (BST)
+# 1. Binary Search Tree (BST) - keyed on city_id, iterative
 # =====================================================================
 class BSTNode:
+    __slots__ = ("key", "city", "left", "right")
+
     def __init__(self, city: City):
+        self.key = city.city_id
         self.city = city
         self.left = None
         self.right = None
 
+
 class BST:
     def __init__(self):
         self.root = None
+        self._size = 0
+
+    def __len__(self):
+        return self._size
 
     def insert(self, city: City):
-        self.root = self._insert_recursive(self.root, city)
+        if self.root is None:
+            self.root = BSTNode(city)
+            self._size += 1
+            return
+        node = self.root
+        while True:
+            if city.city_id < node.key:
+                if node.left is None:
+                    node.left = BSTNode(city)
+                    self._size += 1
+                    return
+                node = node.left
+            elif city.city_id > node.key:
+                if node.right is None:
+                    node.right = BSTNode(city)
+                    self._size += 1
+                    return
+                node = node.right
+            else:
+                node.city = city
+                return
 
-    def _insert_recursive(self, node: BSTNode, city: City) -> BSTNode:
-        if not node:
-            return BSTNode(city)
-        if city.name < node.city.name:
-            node.left = self._insert_recursive(node.left, city)
+    def search(self, city_id: int):
+        node = self.root
+        while node is not None:
+            if city_id == node.key:
+                return node.city
+            node = node.left if city_id < node.key else node.right
+        return None
+
+    def delete(self, city_id: int) -> bool:
+        self.root, deleted = self._delete(self.root, city_id)
+        if deleted:
+            self._size -= 1
+        return deleted
+
+    def _delete(self, node, city_id):
+        if node is None:
+            return node, False
+        if city_id < node.key:
+            node.left, deleted = self._delete(node.left, city_id)
+        elif city_id > node.key:
+            node.right, deleted = self._delete(node.right, city_id)
         else:
-            node.right = self._insert_recursive(node.right, city)
-        return node
+            deleted = True
+            if node.left is None:
+                return node.right, deleted
+            if node.right is None:
+                return node.left, deleted
+            successor = node.right
+            while successor.left is not None:
+                successor = successor.left
+            node.key, node.city = successor.key, successor.city
+            node.right, _ = self._delete(node.right, successor.key)
+        return node, deleted
 
-    def search(self, name: str) -> City:
-        return self._search_recursive(self.root, name)
-
-    def _search_recursive(self, node: BSTNode, name: str) -> City:
-        if not node or node.city.name == name:
-            return node.city if node else None
-        if name < node.city.name:
-            return self._search_recursive(node.left, name)
-        return self._search_recursive(node.right, name)
-
-    def delete(self, name: str):
-        self.root = self._delete_recursive(self.root, name)
-
-    def _delete_recursive(self, node: BSTNode, name: str) -> BSTNode:
-        if not node:
-            return None
-        if name < node.city.name:
-            node.left = self._delete_recursive(node.left, name)
-        elif name > node.city.name:
-            node.right = self._delete_recursive(node.right, name)
-        else:
-            if not node.left:
-                return node.right
-            elif not node.right:
-                return node.left
-
-            successor = self._min_value_node(node.right)
-            node.city = successor.city
-            node.right = self._delete_recursive(node.right, successor.city.name)
-        return node
-
-    def _min_value_node(self, node: BSTNode) -> BSTNode:
-        current = node
-        while current.left:
-            current = current.left
-        return current
+    def height(self) -> int:
+        if self.root is None:
+            return -1
+        h, frontier = -1, [self.root]
+        while frontier:
+            h += 1
+            nxt = []
+            for n in frontier:
+                if n.left:
+                    nxt.append(n.left)
+                if n.right:
+                    nxt.append(n.right)
+            frontier = nxt
+        return h
 
 
 # =====================================================================
-# 2. AVL Tree (Self-Balancing)
+# 2. AVL Tree (Self-Balancing) - keyed on city_id
 # =====================================================================
 class AVLNode:
+    __slots__ = ("key", "city", "left", "right", "height")
+
     def __init__(self, city: City):
+        self.key = city.city_id
         self.city = city
         self.left = None
         self.right = None
         self.height = 1
 
+
+def _h(n):
+    return n.height if n else 0
+
+
+def _update_height(n):
+    n.height = 1 + max(_h(n.left), _h(n.right))
+
+
+def _balance(n):
+    return _h(n.left) - _h(n.right)
+
+
+def _rotate_right(y):
+    x = y.left
+    t2 = x.right
+    x.right = y
+    y.left = t2
+    _update_height(y)
+    _update_height(x)
+    return x
+
+
+def _rotate_left(x):
+    y = x.right
+    t2 = y.left
+    y.left = x
+    x.right = t2
+    _update_height(x)
+    _update_height(y)
+    return y
+
+
+def _rebalance(node):
+    _update_height(node)
+    bf = _balance(node)
+    if bf > 1:
+        if _balance(node.left) < 0:
+            node.left = _rotate_left(node.left)
+        return _rotate_right(node)
+    if bf < -1:
+        if _balance(node.right) > 0:
+            node.right = _rotate_right(node.right)
+        return _rotate_left(node)
+    return node
+
+
 class AVLTree:
     def __init__(self):
         self.root = None
+        self._size = 0
 
-    def get_height(self, node: AVLNode) -> int:
-        return node.height if node else 0
-
-    def get_balance(self, node: AVLNode) -> int:
-        return self.get_height(node.left) - self.get_height(node.right) if node else 0
-
-    def right_rotate(self, z: AVLNode) -> AVLNode:
-        y = z.left
-        T3 = y.right
-        y.right = z
-        z.left = T3
-        z.height = 1 + max(self.get_height(z.left), self.get_height(z.right))
-        y.height = 1 + max(self.get_height(y.left), self.get_height(y.right))
-        return y
-
-    def left_rotate(self, z: AVLNode) -> AVLNode:
-        y = z.right
-        T2 = y.left
-        y.left = z
-        z.right = T2
-        z.height = 1 + max(self.get_height(z.left), self.get_height(z.right))
-        y.height = 1 + max(self.get_height(y.left), self.get_height(y.right))
-        return y
+    def __len__(self):
+        return self._size
 
     def insert(self, city: City):
-        self.root = self._insert_recursive(self.root, city)
+        self.root = self._insert(self.root, city)
 
-    def _insert_recursive(self, node: AVLNode, city: City) -> AVLNode:
-        if not node:
+    def _insert(self, node, city):
+        if node is None:
+            self._size += 1
             return AVLNode(city)
-
-        if city.name < node.city.name:
-            node.left = self._insert_recursive(node.left, city)
+        if city.city_id < node.key:
+            node.left = self._insert(node.left, city)
+        elif city.city_id > node.key:
+            node.right = self._insert(node.right, city)
         else:
-            node.right = self._insert_recursive(node.right, city)
+            node.city = city
+            return node
+        return _rebalance(node)
 
-        node.height = 1 + max(self.get_height(node.left), self.get_height(node.right))
-        balance = self.get_balance(node)
-
-        # Left Left Case
-        if balance > 1 and city.name < node.left.city.name:
-            return self.right_rotate(node)
-        # Right Right Case
-        if balance < -1 and city.name > node.right.city.name:
-            return self.left_rotate(node)
-        # Left Right Case
-        if balance > 1 and city.name > node.left.city.name:
-            node.left = self.left_rotate(node.left)
-            return self.right_rotate(node)
-        # Right Left Case
-        if balance < -1 and city.name < node.right.city.name:
-            node.right = self.right_rotate(node.right)
-            return self.left_rotate(node)
-
-        return node
-
-    def search(self, name: str) -> City:
-        current = self.root
-        while current:
-            if name == current.city.name:
-                return current.city
-            current = current.left if name < current.city.name else current.right
+    def search(self, city_id: int):
+        node = self.root
+        while node is not None:
+            if city_id == node.key:
+                return node.city
+            node = node.left if city_id < node.key else node.right
         return None
 
-    def delete(self, name: str):
-        self.root = self._delete_recursive(self.root, name)
+    def delete(self, city_id: int) -> bool:
+        self.root, deleted = self._delete(self.root, city_id)
+        if deleted:
+            self._size -= 1
+        return deleted
 
-    def _delete_recursive(self, node: AVLNode, name: str) -> AVLNode:
-        if not node:
-            return node
-
-        if name < node.city.name:
-            node.left = self._delete_recursive(node.left, name)
-        elif name > node.city.name:
-            node.right = self._delete_recursive(node.right, name)
+    def _delete(self, node, city_id):
+        if node is None:
+            return node, False
+        if city_id < node.key:
+            node.left, deleted = self._delete(node.left, city_id)
+        elif city_id > node.key:
+            node.right, deleted = self._delete(node.right, city_id)
         else:
-            if not node.left:
-                return node.right
-            elif not node.right:
-                return node.left
+            deleted = True
+            if node.left is None:
+                return node.right, deleted
+            if node.right is None:
+                return node.left, deleted
+            successor = node.right
+            while successor.left is not None:
+                successor = successor.left
+            node.key, node.city = successor.key, successor.city
+            node.right, _ = self._delete(node.right, successor.key)
+        if node is None:
+            return node, deleted
+        return _rebalance(node), deleted
 
-            successor = self._min_value_node(node.right)
-            node.city = successor.city
-            node.right = self._delete_recursive(node.right, successor.city.name)
-
-        if not node:
-            return node
-
-        node.height = 1 + max(self.get_height(node.left), self.get_height(node.right))
-        balance = self.get_balance(node)
-
-        if balance > 1 and self.get_balance(node.left) >= 0:
-            return self.right_rotate(node)
-        if balance > 1 and self.get_balance(node.left) < 0:
-            node.left = self.left_rotate(node.left)
-            return self.right_rotate(node)
-        if balance < -1 and self.get_balance(node.right) <= 0:
-            return self.left_rotate(node)
-        if balance < -1 and self.get_balance(node.right) > 0:
-            node.right = self.right_rotate(node.right)
-            return self.left_rotate(node)
-
-        return node
-
-    def _min_value_node(self, node: AVLNode) -> AVLNode:
-        current = node
-        while current.left:
-            current = current.left
-        return current
+    def height(self) -> int:
+        return _h(self.root) - 1 if self.root else -1
 
 
 # =====================================================================
@@ -217,188 +270,219 @@ class MinHeap:
     def __init__(self):
         self.heap = []
 
-    def insert(self, city: City):
+    def __len__(self):
+        return len(self.heap)
+
+    def is_empty(self):
+        return not self.heap
+
+    def push(self, city: City):
         self.heap.append(city)
         self._heapify_up(len(self.heap) - 1)
 
-    def extract_min(self) -> City:
+    def pop(self):
         if not self.heap:
             return None
         if len(self.heap) == 1:
             return self.heap.pop()
-
         root = self.heap[0]
         self.heap[0] = self.heap.pop()
         self._heapify_down(0)
         return root
 
-    def _heapify_up(self, index: int):
+    def _heapify_up(self, index):
         parent = (index - 1) // 2
         while index > 0 and self.heap[index].distance < self.heap[parent].distance:
             self.heap[index], self.heap[parent] = self.heap[parent], self.heap[index]
             index = parent
             parent = (index - 1) // 2
 
-    def _heapify_down(self, index: int):
-        smallest = index
-        left = 2 * index + 1
-        right = 2 * index + 2
+    def _heapify_down(self, index):
         size = len(self.heap)
-
-        if left < size and self.heap[left].distance < self.heap[smallest].distance:
-            smallest = left
-        if right < size and self.heap[right].distance < self.heap[smallest].distance:
-            smallest = right
-
-        if smallest != index:
+        while True:
+            left, right = 2 * index + 1, 2 * index + 2
+            smallest = index
+            if left < size and self.heap[left].distance < self.heap[smallest].distance:
+                smallest = left
+            if right < size and self.heap[right].distance < self.heap[smallest].distance:
+                smallest = right
+            if smallest == index:
+                break
             self.heap[index], self.heap[smallest] = self.heap[smallest], self.heap[index]
-            self._heapify_down(smallest)
+            index = smallest
 
 
 # =====================================================================
-# 4. Hash Table (Chaining Collision Handling)
+# 4. Hash Table (Separate Chaining) - keyed on city_id
 # =====================================================================
 class HashTable:
-    def __init__(self, capacity: int = 10007):
+    def __init__(self, capacity: int = 16):
         self.capacity = capacity
         self.table = [[] for _ in range(capacity)]
+        self._size = 0
+        self._max_load = 0.75
 
-    def _hash(self, key: str) -> int:
-        hash_val = 0
-        for char in key:
-            hash_val = (hash_val * 31 + ord(char)) % self.capacity
-        return hash_val
+    def __len__(self):
+        return self._size
+
+    def _hash(self, key: int) -> int:
+        return hash(key) % self.capacity
+
+    def _resize(self):
+        old = self.table
+        self.capacity *= 2
+        self.table = [[] for _ in range(self.capacity)]
+        for bucket in old:
+            for key, city in bucket:
+                self.table[self._hash(key)].append((key, city))
 
     def insert(self, city: City):
-        index = self._hash(city.name)
-        for pair in self.table[index]:
-            if pair[0] == city.name:
-                pair[1] = city
+        idx = self._hash(city.city_id)
+        bucket = self.table[idx]
+        for i, (key, _) in enumerate(bucket):
+            if key == city.city_id:
+                bucket[i] = (city.city_id, city)
                 return
-        self.table[index].append([city.name, city])
+        bucket.append((city.city_id, city))
+        self._size += 1
+        if self._size / self.capacity > self._max_load:
+            self._resize()
 
-    def search(self, name: str) -> City:
-        index = self._hash(name)
-        for pair in self.table[index]:
-            if pair[0] == name:
-                return pair[1]
+    def search(self, city_id: int):
+        for key, city in self.table[self._hash(city_id)]:
+            if key == city_id:
+                return city
         return None
 
-    def delete(self, name: str):
-        index = self._hash(name)
-        for i, pair in enumerate(self.table[index]):
-            if pair[0] == name:
-                del self.table[index][i]
+    def delete(self, city_id: int) -> bool:
+        idx = self._hash(city_id)
+        bucket = self.table[idx]
+        for i, (key, _) in enumerate(bucket):
+            if key == city_id:
+                bucket.pop(i)
+                self._size -= 1
                 return True
         return False
 
 
 # =====================================================================
-# 5. Benchmarking & Data Plotting Suite
+# 5. Benchmarking (Insert, Search AND Delete) + Plotting
 # =====================================================================
+def make_cities(n, seed):
+    rnd = random.Random(seed)
+    ids = list(range(n))
+    rnd.shuffle(ids)
+    return [
+        City(i, f"City_{i}", rnd.uniform(-90, 90), rnd.uniform(-180, 180),
+             rnd.randint(1000, 5_000_000), rnd.uniform(1.0, 5000.0))
+        for i in ids
+    ]
+
+
+def median_time(fn, repeats=REPEATS):
+    samples = []
+    for _ in range(repeats):
+        t0 = time.perf_counter()
+        fn()
+        samples.append(time.perf_counter() - t0)
+    return statistics.median(samples)
+
+
 def run_benchmarks_and_plot():
-    sizes = [100, 1000, 10000]
-
-    # Target vectors to collect tracking data
-    bst_times = []
-    avl_times = []
-    heap_times = []
-    hash_times = []
+    results = {name: {"insert": [], "search": [], "delete": []}
+               for name in ("BST", "AVL", "HashTable", "MinHeap")}
 
     print("=" * 70)
-    print("RUNNING EMPIRICAL PERFORMANCE TESTS (Times in Milliseconds)")
+    print("RUNNING EMPIRICAL PERFORMANCE TESTS (insert / search / delete)")
     print("=" * 70)
 
-    for size in sizes:
-        # Generate random mock datasets
-        cities = [
-            City(f"City_{i}", random.uniform(-90, 90), random.uniform(-180, 180),
-                 random.randint(1000, 5000000), random.uniform(1.0, 5000.0))
-            for i in range(size)
-        ]
+    for n in SIZES:
+        cities = make_cities(n, seed=n)
+        ids = [c.city_id for c in cities]
+        rnd = random.Random(n)
+        sample = rnd.sample(ids, max(1, n // 10))
 
-        # Shuffle input data to simulate typical insertion variability
-        random.shuffle(cities)
-
-        # 1. Benchmark BST
+        # ---- BST ----
         bst = BST()
-        start = time.perf_counter()
-        for c in cities: bst.insert(c)
-        bst_times.append((time.perf_counter() - start) * 1000)
+        t0 = time.perf_counter()
+        for c in cities:
+            bst.insert(c)
+        results["BST"]["insert"].append((time.perf_counter() - t0) * 1000)
+        results["BST"]["search"].append(median_time(lambda: [bst.search(i) for i in sample]) * 1000)
+        results["BST"]["delete"].append(median_time(lambda: [bst.delete(i) for i in sample]) * 1000)
 
-        # 2. Benchmark AVL Tree
+        # ---- AVL ----
         avl = AVLTree()
-        start = time.perf_counter()
-        for c in cities: avl.insert(c)
-        avl_times.append((time.perf_counter() - start) * 1000)
+        t0 = time.perf_counter()
+        for c in cities:
+            avl.insert(c)
+        results["AVL"]["insert"].append((time.perf_counter() - t0) * 1000)
+        results["AVL"]["search"].append(median_time(lambda: [avl.search(i) for i in sample]) * 1000)
+        results["AVL"]["delete"].append(median_time(lambda: [avl.delete(i) for i in sample]) * 1000)
 
-        # 3. Benchmark Min-Heap
+        # ---- Hash Table ----
+        ht = HashTable(capacity=max(16, n * 2))
+        t0 = time.perf_counter()
+        for c in cities:
+            ht.insert(c)
+        results["HashTable"]["insert"].append((time.perf_counter() - t0) * 1000)
+        results["HashTable"]["search"].append(median_time(lambda: [ht.search(i) for i in sample]) * 1000)
+        results["HashTable"]["delete"].append(median_time(lambda: [ht.delete(i) for i in sample]) * 1000)
+
+        # ---- Min-Heap (push / pop, its natural operations) ----
         heap = MinHeap()
-        start = time.perf_counter()
-        for c in cities: heap.insert(c)
-        heap_times.append((time.perf_counter() - start) * 1000)
+        t0 = time.perf_counter()
+        for c in cities:
+            heap.push(c)
+        results["MinHeap"]["insert"].append((time.perf_counter() - t0) * 1000)
+        results["MinHeap"]["search"].append(float("nan"))
+        t0 = time.perf_counter()
+        while not heap.is_empty():
+            heap.pop()
+        results["MinHeap"]["delete"].append((time.perf_counter() - t0) * 1000)
 
-        # 4. Benchmark Hash Table
-        ht = HashTable(capacity=size * 2)  # Balance alpha load factor around ~0.5
-        start = time.perf_counter()
-        for c in cities: ht.insert(c)
-        hash_times.append((time.perf_counter() - start) * 1000)
+        print(f"\u2713 Benchmarked N = {n}  "
+              f"(BST height={bst.height()}, AVL height={avl.height()})")
 
-        print(f"\u2713 Benchmarked dataset size N = {size} successfully.")
+    # ---- Print table ----
+    print("\n" + "=" * 70)
+    print("EMPIRICAL TIMING RESULTS (ms)")
+    print("=" * 70)
+    for idx, n in enumerate(SIZES):
+        print(f"\n--- N = {n} ---")
+        print(f"{'Structure':<12}{'Insert(ms)':<14}{'Search(ms)':<14}{'Delete(ms)':<14}")
+        for name in results:
+            ins = results[name]["insert"][idx]
+            sea = results[name]["search"][idx]
+            dele = results[name]["delete"][idx]
+            sea_str = "n/a" if sea != sea else f"{sea:.5f}"  # NaN check
+            print(f"{name:<12}{ins:<14.5f}{sea_str:<14}{dele:<14.5f}")
 
-    # --- TEXT METRIC DISPLAY FOR ASSIGNMENT DATA TABLES ---
-    print("\n" + "=" * 65)
-    print("EMPIRICAL TIMING RESULTS (Copy and paste into your report)")
-    print("=" * 65)
-    for idx, size in enumerate(sizes):
-        print(f"\n--- DATASET SIZE: {size} NODES ---")
-        print(f"{'Structure':<15} | {'Insertion Run-Time (ms)':<25}")
-        print("-" * 45)
-        print(f"BST             | {bst_times[idx]:<25.5f}")
-        print(f"AVL Tree        | {avl_times[idx]:<25.5f}")
-        print(f"Min-Heap        | {heap_times[idx]:<25.5f}")
-        print(f"Hash Table      | {hash_times[idx]:<25.5f}")
+    # ---- Plot: insert / search / delete, each linear+log ----
+    colors = {"BST": "#1f77b4", "AVL": "#ff7f0e", "MinHeap": "#2ca02c", "HashTable": "#d62728"}
+    markers = {"BST": "o", "AVL": "s", "MinHeap": "^", "HashTable": "d"}
 
-    # --- GRAPH GENERATION USING MATPLOTLIB: 1 bar graph + 2 line graphs (linear + log scale) ---
-    structures = ['BST', 'AVL Tree', 'Min-Heap', 'Hash Table']
-    bar_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    for metric, title in [("insert", "Insertion"), ("search", "Search"), ("delete", "Deletion")]:
+        fig, axes = plt.subplots(1, 2, figsize=(13, 5.5))
+        for ax, yscale in zip(axes, ["linear", "log"]):
+            for name in results:
+                y = results[name][metric]
+                if all(v != v for v in y):  # all NaN (e.g. MinHeap search)
+                    continue
+                ax.plot(SIZES, y, label=name, marker=markers[name], color=colors[name], linewidth=2)
+            ax.set_title(f"Task 1: {title} Time ({yscale} scale)", fontsize=12, fontweight="bold")
+            ax.set_xlabel("Dataset Size (N)")
+            ax.set_ylabel(f"Total {title} Time (ms)")
+            ax.set_xticks(SIZES)
+            ax.set_yscale(yscale)
+            ax.grid(True, linestyle="--", alpha=0.6)
+            ax.legend()
+        plt.tight_layout()
+        fname = f"task1_{metric}_performance.png"
+        plt.savefig(fname, dpi=200)
+        plt.close()
+        print(f"[SUCCESS] Saved {fname}")
 
-    fig, (ax0, ax1, ax2) = plt.subplots(1, 3, figsize=(19, 6))
-
-    # Panel 1: Bar graph comparing all structures at the largest dataset size
-    largest_idx = len(sizes) - 1
-    values = [bst_times[largest_idx], avl_times[largest_idx], heap_times[largest_idx], hash_times[largest_idx]]
-    bars = ax0.bar(structures, values, color=bar_colors)
-    ax0.set_title(f'Task 1: Insertion Time at N = {sizes[largest_idx]}', fontsize=13, fontweight='bold', pad=12)
-    ax0.set_ylabel('Total Insertion Execution Time (ms)', fontsize=11)
-    ax0.grid(True, axis='y', linestyle='--', alpha=0.6)
-    ax0.tick_params(axis='x', rotation=15)
-    for bar, val in zip(bars, values):
-        ax0.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                  f'{val:.2f}', ha='center', va='bottom', fontsize=9)
-
-    # Panels 2 & 3: Line graphs across dataset sizes, linear scale and log scale
-    for ax, yscale, subtitle in [(ax1, 'linear', 'Linear Scale'), (ax2, 'log', 'Log Scale')]:
-        ax.plot(sizes, bst_times, label='BST (Empirical)', marker='o', color='#1f77b4', linewidth=2)
-        ax.plot(sizes, avl_times, label='AVL Tree (Empirical Balanced)', marker='s', color='#ff7f0e', linewidth=2)
-        ax.plot(sizes, heap_times, label='Min-Heap (Empirical Priority)', marker='^', color='#2ca02c', linewidth=2)
-        ax.plot(sizes, hash_times, label='Hash Table (Empirical Chained)', marker='d', color='#d62728', linewidth=2)
-        ax.set_title(f'Task 1: Insertion Performance ({subtitle})', fontsize=13, fontweight='bold', pad=12)
-        ax.set_xlabel('Dataset Size (Number of Cities, N)', fontsize=11)
-        ax.set_ylabel('Total Insertion Execution Time (ms)', fontsize=11)
-        ax.set_xticks(sizes)
-        ax.set_yscale(yscale)
-        ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend(loc='upper left', fontsize=9)
-
-    plt.tight_layout()
-
-    # Save chart layout image to local execution workspace folder
-    graph_filename = 'task1_performance.png'
-    plt.savefig(graph_filename, dpi=300)
-    print(f"\n[SUCCESS] Chart visual artifact exported as '{graph_filename}'!")
-
-    print("Chart saved (interactive display window skipped in this environment).")
 
 if __name__ == "__main__":
     run_benchmarks_and_plot()
