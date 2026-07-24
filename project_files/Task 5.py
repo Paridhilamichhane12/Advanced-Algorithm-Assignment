@@ -12,27 +12,10 @@ np.random.seed(42)
 # =====================================================================
  
 def np_merge(arr, lo, mid, hi):
-    """Merge arr[lo:mid] and arr[mid:hi] (already sorted) in place.
- 
-    IMPORTANT: this is a fully VECTORISED merge (no per-element Python
-    loop). A naive element-by-element loop that reads/writes individual
-    NumPy scalars is actually SLOWER than plain Python lists, because
-    each single-element access still goes through NumPy's overhead
-    without getting any of the benefit of batched C execution. The
-    vectorised approach below uses np.searchsorted to compute, for
-    every element, its final position in the merged array, then writes
-    both halves in with two batched array assignments. Each of these
-    calls runs as compiled C code and releases the GIL while running,
-    which is what actually lets other Python threads make progress on
-    other cores concurrently.
-    """
+   
     left = arr[lo:mid]
     right = arr[mid:hi]
     n_left, n_right = len(left), len(right)
- 
-    # For each element of `left`, how many elements of `right` are
-    # strictly less than it? That count is how many `right` elements
-    # must land before it in the merged array.
     left_positions = np.arange(n_left) + np.searchsorted(right, left, side='right')
     # Symmetric count for `right` relative to `left`.
     right_positions = np.arange(n_right) + np.searchsorted(left, right, side='left')
@@ -58,28 +41,25 @@ def sequential_merge_sort(arr, lo, hi):
 # =====================================================================
  
 class ParallelMergeSort:
-    SEQ_CUTOFF = 20000  # below this size, sort sequentially in-thread
-                          # (thread creation overhead would dominate)
+    SEQ_CUTOFF = 20000  
  
     def __init__(self, max_threads=4):
         self.max_threads = max_threads
         self.active_threads = 0
-        self.lock = threading.Lock()  # protects active_threads (critical section)
+        self.lock = threading.Lock()  
  
     def _try_reserve_thread(self):
-        """Critical section: atomically check-and-increment the shared
-        thread budget. Returns True if a slot was reserved."""
-        with self.lock:                       # --- CRITICAL SECTION START ---
+        with self.lock:                      
             if self.active_threads < self.max_threads:
                 self.active_threads += 1
                 return True
             return False
-                                                # --- CRITICAL SECTION END ---
+                                                
  
     def _release_thread(self):
-        with self.lock:                       # --- CRITICAL SECTION START ---
+        with self.lock:                     
             self.active_threads -= 1
-                                                # --- CRITICAL SECTION END ---
+                                              
  
     def _parallel_sort(self, arr, lo, hi):
         if hi - lo <= 1:
@@ -91,22 +71,17 @@ class ParallelMergeSort:
         mid = lo + (hi - lo) // 2
  
         if self._try_reserve_thread():
-            # Spawn a thread to sort the LEFT half concurrently while
-            # this thread sorts the RIGHT half itself.
+            
             left_thread = threading.Thread(
                 target=self._parallel_sort, args=(arr, lo, mid)
             )
             left_thread.start()
  
-            self._parallel_sort(arr, mid, hi)   # right half, this thread
+            self._parallel_sort(arr, mid, hi)   
  
-            left_thread.join()                  # synchronisation barrier:
-                                                 # guarantees left half is
-                                                 # fully sorted and visible
-                                                 # before merging below
+            left_thread.join()                  
             self._release_thread()
         else:
-            # Thread budget exhausted: fall back to sequential recursion.
             self._parallel_sort(arr, lo, mid)
             self._parallel_sort(arr, mid, hi)
  
