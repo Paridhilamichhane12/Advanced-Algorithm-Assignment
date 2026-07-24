@@ -1,211 +1,230 @@
 import time
 import random
 import threading
+import numpy as np
 import matplotlib.pyplot as plt
-
-# Set random seed for consistent performance benchmarks
+ 
 random.seed(42)
-
+np.random.seed(42)
+ 
 # =====================================================================
-# 1. PARALLEL MERGE SORT WITH MUTEX SYNCHRONIZATION
+# 1. SEQUENTIAL BASELINE (NumPy-vectorised merge, single thread)
 # =====================================================================
+ 
+def np_merge(arr, lo, mid, hi):
+    """Merge arr[lo:mid] and arr[mid:hi] (already sorted) in place.
+ 
+    IMPORTANT: this is a fully VECTORISED merge (no per-element Python
+    loop). A naive element-by-element loop that reads/writes individual
+    NumPy scalars is actually SLOWER than plain Python lists, because
+    each single-element access still goes through NumPy's overhead
+    without getting any of the benefit of batched C execution. The
+    vectorised approach below uses np.searchsorted to compute, for
+    every element, its final position in the merged array, then writes
+    both halves in with two batched array assignments. Each of these
+    calls runs as compiled C code and releases the GIL while running,
+    which is what actually lets other Python threads make progress on
+    other cores concurrently.
+    """
+    left = arr[lo:mid]
+    right = arr[mid:hi]
+    n_left, n_right = len(left), len(right)
+ 
+    # For each element of `left`, how many elements of `right` are
+    # strictly less than it? That count is how many `right` elements
+    # must land before it in the merged array.
+    left_positions = np.arange(n_left) + np.searchsorted(right, left, side='right')
+    # Symmetric count for `right` relative to `left`.
+    right_positions = np.arange(n_right) + np.searchsorted(left, right, side='left')
+ 
+    merged = np.empty(n_left + n_right, dtype=arr.dtype)
+    merged[left_positions] = left
+    merged[right_positions] = right
+ 
+    arr[lo:hi] = merged
+ 
+ 
+def sequential_merge_sort(arr, lo, hi):
+    if hi - lo <= 1:
+        return
+    mid = lo + (hi - lo) // 2
+    sequential_merge_sort(arr, lo, mid)
+    sequential_merge_sort(arr, mid, hi)
+    np_merge(arr, lo, mid, hi)
+ 
+ 
+# =====================================================================
+# 2. CONCURRENT (threading + mutex) MERGE SORT
+# =====================================================================
+ 
 class ParallelMergeSort:
+    SEQ_CUTOFF = 20000  # below this size, sort sequentially in-thread
+                          # (thread creation overhead would dominate)
+ 
     def __init__(self, max_threads=4):
         self.max_threads = max_threads
-        self.thread_count = 1
-        self.lock = threading.Lock()  # Mutex protecting the active thread counter
-
-    def _merge(self, arr, low, mid, high):
-        """Standard merge step combining two sorted sub-arrays."""
-        left = arr[low:mid + 1]
-        right = arr[mid + 1:high + 1]
-        
-        i = j = 0
-        k = low
-        
-        while i < len(left) and j < len(right):
-            if left[i] <= right[j]:
-                arr[k] = left[i]
-                i += 1
-            else:
-                arr[k] = right[j]
-                j += 1
-            k += 1
-            
-        while i < len(left):
-            arr[k] = left[i]
-            i += 1
-            k += 1
-            
-        while j < len(right):
-            arr[k] = right[j]
-            j += 1
-            k += 1
-
-    def _sequential_sort(self, arr, low, high):
-        """Fallback to high-performance sequential merge sort."""
-        if low < high:
-            mid = (low + high) // 2
-            self._sequential_sort(arr, low, mid)
-            self._sequential_sort(arr, mid + 1, high)
-            self._merge(arr, low, mid, high)
-
-    def _parallel_sort(self, arr, low, high):
-        """Recursive sorting using thread-spawning with global limits."""
-        if low >= high:
+        self.active_threads = 0
+        self.lock = threading.Lock()  # protects active_threads (critical section)
+ 
+    def _try_reserve_thread(self):
+        """Critical section: atomically check-and-increment the shared
+        thread budget. Returns True if a slot was reserved."""
+        with self.lock:                       # --- CRITICAL SECTION START ---
+            if self.active_threads < self.max_threads:
+                self.active_threads += 1
+                return True
+            return False
+                                                # --- CRITICAL SECTION END ---
+ 
+    def _release_thread(self):
+        with self.lock:                       # --- CRITICAL SECTION START ---
+            self.active_threads -= 1
+                                                # --- CRITICAL SECTION END ---
+ 
+    def _parallel_sort(self, arr, lo, hi):
+        if hi - lo <= 1:
             return
-
-        mid = (low + high) // 2
-        spawn_thread = False
-
-        # --- CRITICAL SECTION ---
-        # Safely query and update the active thread count using the mutex lock
-        with self.lock:
-            if self.thread_count < self.max_threads:
-                self.thread_count += 1
-                spawn_thread = True
-
-        if spawn_thread:
-            # Spawn a concurrent thread to sort the left half
+        if hi - lo <= self.SEQ_CUTOFF:
+            sequential_merge_sort(arr, lo, hi)
+            return
+ 
+        mid = lo + (hi - lo) // 2
+ 
+        if self._try_reserve_thread():
+            # Spawn a thread to sort the LEFT half concurrently while
+            # this thread sorts the RIGHT half itself.
             left_thread = threading.Thread(
-                target=self._parallel_sort, 
-                args=(arr, low, mid)
+                target=self._parallel_sort, args=(arr, lo, mid)
             )
             left_thread.start()
-
-            # The parent thread processes the right half concurrently
-            self._parallel_sort(arr, mid + 1, high)
-
-            # Synchronization: Wait for the child thread to finish
-            left_thread.join()
-
-            # Safely release the thread slot
-            with self.lock:
-                self.thread_count -= 1
+ 
+            self._parallel_sort(arr, mid, hi)   # right half, this thread
+ 
+            left_thread.join()                  # synchronisation barrier:
+                                                 # guarantees left half is
+                                                 # fully sorted and visible
+                                                 # before merging below
+            self._release_thread()
         else:
-            # Thread limit reached: Fallback to sequential execution
-            self._sequential_sort(arr, low, mid)
-            self._sequential_sort(arr, mid + 1, high)
-
-        # Merge the two halves
-        self._merge(arr, low, mid, high)
-
+            # Thread budget exhausted: fall back to sequential recursion.
+            self._parallel_sort(arr, lo, mid)
+            self._parallel_sort(arr, mid, hi)
+ 
+        np_merge(arr, lo, mid, hi)
+ 
     def sort(self, arr):
-        self.thread_count = 1
-        self._parallel_sort(arr, 0, len(arr) - 1)
-
-
+        self.active_threads = 0
+        self._parallel_sort(arr, 0, len(arr))
+ 
+ 
 # =====================================================================
-# 2. EXPERIMENT RUNNER & PERFORMANCE PROFILER
+# 3. EXPERIMENT RUNNER (1, 2, 4, 8 threads; median of several repeats)
 # =====================================================================
+ 
+def run_sequential_once(data):
+    arr = np.array(data, dtype=np.float64)
+    t0 = time.perf_counter()
+    sequential_merge_sort(arr, 0, len(arr))
+    t1 = time.perf_counter()
+    assert np.all(arr[:-1] <= arr[1:]), "Sequential result not sorted!"
+    return t1 - t0
+ 
+ 
+def run_parallel_once(data, num_threads):
+    arr = np.array(data, dtype=np.float64)
+    sorter = ParallelMergeSort(max_threads=num_threads)
+    t0 = time.perf_counter()
+    sorter.sort(arr)
+    t1 = time.perf_counter()
+    assert np.all(arr[:-1] <= arr[1:]), "Parallel result not sorted! (race condition or bug)"
+    return t1 - t0
+ 
+ 
 if __name__ == "__main__":
     print("=" * 80)
-    print("                TASK 5: CONCURRENT PROGRAMMING BENCHMARK")
+    print("      TASK 5: CONCURRENT PROGRAMMING BENCHMARK (Python threading + NumPy)")
     print("=" * 80)
-
-    # Dataset Size (Adjust according to local CPU speeds)
-    dataset_size = 150000
-    original_data = [random.random() for _ in range(dataset_size)]
-    
-    print(f"Dataset Initialized: Sorting {dataset_size:,} elements.")
-    print("Running benchmarks across 1, 2, 4, and 8 thread configurations...\n")
-
-    thread_configs = [1, 2, 4, 8]
+ 
+    DATASET_SIZE = 500_000  # increase this on a real multi-core machine
+                              # (e.g. 2-5 million) for a clearer speedup signal
+    REPEATS = 5
+    THREAD_CONFIGS = [1, 2, 4, 8]
+ 
+    original_data = [random.random() for _ in range(DATASET_SIZE)]
+    print(f"Dataset Initialized: Sorting {DATASET_SIZE:,} elements.")
+    print(f"Running benchmarks across {THREAD_CONFIGS} thread configurations, "
+          f"{REPEATS} repeats each (median reported)...\n")
+ 
+    # --- Sequential baseline ---
+    seq_times = [run_sequential_once(original_data) for _ in range(REPEATS)]
+    seq_median = sorted(seq_times)[len(seq_times) // 2]
+    print(f"Sequential baseline | median runtime: {seq_median:.4f}s "
+          f"(runs: {[f'{t:.3f}' for t in seq_times]})")
+ 
+    # --- Parallel configurations ---
     runtimes = []
     speedups = []
-
-    # 1. Measure 1 Thread (Baseline)
-    baseline_data = list(original_data)
-    t0 = time.perf_counter()
-    sorter_1 = ParallelMergeSort(max_threads=1)
-    sorter_1.sort(baseline_data)
-    t_baseline = time.perf_counter() - t0
-    
-    runtimes.append(t_baseline)
-    speedups.append(1.0)
-    print(f"Threads: 1 (Baseline) | Runtime: {t_baseline:.4f}s | Speedup: 1.00x")
-
-    # 2. Run Benchmarks for Multi-Threaded Configurations
-    for t in thread_configs[1:]:
-        test_data = list(original_data)
-        t0 = time.perf_counter()
-        sorter = ParallelMergeSort(max_threads=t)
-        sorter.sort(test_data)
-        t_elapsed = time.perf_counter() - t0
-        
-        runtimes.append(t_elapsed)
-        speedup = t_baseline / t_elapsed
-        speedups.append(speedup)
-        print(f"Threads: {t:<12} | Runtime: {t_elapsed:.4f}s | Speedup: {speedup:.2f}x")
-
-    # Calculate Parallel Efficiency (E_p = S_p / p)
-    efficiencies = [s / t for s, t in zip(speedups, thread_configs)]
-
+    for nt in THREAD_CONFIGS:
+        times = [run_parallel_once(original_data, nt) for _ in range(REPEATS)]
+        med = sorted(times)[len(times) // 2]
+        sp = seq_median / med
+        runtimes.append(med)
+        speedups.append(sp)
+        print(f"Threads: {nt:<3} | median runtime: {med:.4f}s | speedup: {sp:.2f}x "
+              f"(runs: {[f'{t:.3f}' for t in times]})")
+ 
+    efficiencies = [s / t for s, t in zip(speedups, THREAD_CONFIGS)]
+ 
     print("\n" + "=" * 80)
-    print("Generating pure line-graph scalability dashboard...")
-
+    print(f"{'Threads':>8} {'Time(s)':>10} {'Speedup':>10} {'Efficiency':>12}")
+    print("-" * 44)
+    for nt, rt, sp, ef in zip(THREAD_CONFIGS, runtimes, speedups, efficiencies):
+        print(f"{nt:>8} {rt:>10.4f} {sp:>9.2f}x {ef*100:>10.1f}%")
+ 
     # =====================================================================
-    # 3. DUAL-PANEL LINE GRAPH DASHBOARD
+    # 4. PLOT: Speedup vs Thread Count
     # =====================================================================
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), dpi=300)
-    fig.suptitle("Task 5: Multi-Threaded Scalability & Efficiency Analysis", 
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), dpi=150)
+    fig.suptitle("Task 5: Parallel Merge Sort — Scalability & Efficiency (Python threading)",
                  fontsize=14, fontweight='bold', y=0.98)
-
-    # -----------------------------------------------------------------
-    # PANEL 1: Absolute Wall-Clock Runtime (Line Graph)
-    # -----------------------------------------------------------------
-    ax1.plot(thread_configs, runtimes, 
-             color="#4A90E2", linewidth=2.5, marker='o', markersize=8, 
-             label="Measured Runtime (seconds)")
-    ax1.set_title("Absolute Wall-Clock Runtime Decay", fontsize=11, fontweight='semibold', pad=10)
-    ax1.set_xlabel("Thread Count (p)", fontsize=10)
-    ax1.set_ylabel("Execution Time (Seconds)", fontsize=10)
-    ax1.set_xticks(thread_configs)
+ 
+    ax1.plot(THREAD_CONFIGS, runtimes, color="#4A90E2", linewidth=2.5,
+              marker='o', markersize=8, label="Measured Runtime (s)")
+    ax1.set_title("Wall-Clock Runtime vs Thread Count", fontsize=11, fontweight='semibold')
+    ax1.set_xlabel("Thread Count (p)")
+    ax1.set_ylabel("Execution Time (seconds)")
+    ax1.set_xticks(THREAD_CONFIGS)
     ax1.grid(True, linestyle='--', alpha=0.5)
-    ax1.legend(fontsize=9, loc="upper right")
-
-    # Add precise runtime text annotations next to each data point
-    for t, r in zip(thread_configs, runtimes):
-        ax1.annotate(f'{r:.3f}s',
-                     xy=(t, r),
-                     xytext=(8, 5),  # offset labels to the right and slightly up
-                     textcoords="offset points",
-                     ha='left', va='center', fontsize=9, fontweight='semibold')
-
-    # -----------------------------------------------------------------
-    # PANEL 2: Speedup vs. Parallel Efficiency (Dual-Axis Line Graph)
-    # -----------------------------------------------------------------
-    # Primary Y-Axis: Speedup Factor
-    color_speedup = '#D9534F'
-    line1 = ax2.plot(thread_configs, speedups, color=color_speedup, marker='o', 
-                     linewidth=2.5, label="Empirical Speedup ($S_p$)", zorder=3)
-    ax2.plot(thread_configs, thread_configs, color='#7f7f7f', linestyle='--', 
-             linewidth=1.2, label="Ideal Linear Speedup ($S_p = p$)", alpha=0.7)
-
-    ax2.set_title("Speedup Factor & Multi-Core Efficiency", fontsize=11, fontweight='semibold', pad=10)
-    ax2.set_xlabel("Thread Count (p)", fontsize=10)
-    ax2.set_ylabel("Measured Speedup Factor ($S_p$)", color=color_speedup, fontsize=10)
-    ax2.tick_params(axis='y', labelcolor=color_speedup)
-    ax2.set_xticks(thread_configs)
+    ax1.legend()
+    for t, r in zip(THREAD_CONFIGS, runtimes):
+        ax1.annotate(f'{r:.3f}s', xy=(t, r), xytext=(8, 5),
+                     textcoords="offset points", fontsize=9, fontweight='semibold')
+ 
+    color_sp = '#D9534F'
+    l1 = ax2.plot(THREAD_CONFIGS, speedups, color=color_sp, marker='o',
+                   linewidth=2.5, label="Empirical Speedup ($S_p$)", zorder=3)
+    ax2.plot(THREAD_CONFIGS, THREAD_CONFIGS, color='#7f7f7f', linestyle='--',
+              linewidth=1.2, label="Ideal Linear Speedup", alpha=0.7)
+    ax2.set_title("Speedup & Efficiency vs Thread Count", fontsize=11, fontweight='semibold')
+    ax2.set_xlabel("Thread Count (p)")
+    ax2.set_ylabel("Speedup ($S_p$)", color=color_sp)
+    ax2.tick_params(axis='y', labelcolor=color_sp)
+    ax2.set_xticks(THREAD_CONFIGS)
     ax2.grid(True, linestyle='--', alpha=0.5)
-
-    # Secondary Y-Axis: System Parallel Efficiency
+ 
     ax3 = ax2.twinx()
-    color_eff = '#2CA02C'
-    line2 = ax3.plot(thread_configs, efficiencies, color=color_eff, marker='s', linestyle='-.',
-                     linewidth=2, label="Parallel Efficiency ($E_p$)", zorder=3)
-    ax3.set_ylabel("Parallel Efficiency ($E_p = S_p / p$)", color=color_eff, fontsize=10)
-    ax3.tick_params(axis='y', labelcolor=color_eff)
+    color_ef = '#2CA02C'
+    l2 = ax3.plot(THREAD_CONFIGS, efficiencies, color=color_ef, marker='s',
+                   linestyle='-.', linewidth=2, label="Efficiency ($E_p$)", zorder=3)
+    ax3.set_ylabel("Efficiency ($E_p = S_p/p$)", color=color_ef)
+    ax3.tick_params(axis='y', labelcolor=color_ef)
     ax3.set_ylim(0, 1.1)
-
-    # Combined Legend for the Dual-Axis Panel
-    lines = line1 + line2
-    labels = [l.get_label() for l in lines]
-    ax2.legend(lines, labels, loc="upper left", fontsize=9)
-
-    # Adjust spacing and save
+ 
+    lines = l1 + l2
+    ax2.legend(lines, [l.get_label() for l in lines], loc="upper right", fontsize=9)
+ 
     plt.tight_layout()
-    output_filename = "task5_scalability_line_dashboard.png"
-    plt.savefig(output_filename, bbox_inches='tight')
-    print(f"Success! Pure line-graph scalability dashboard saved as '{output_filename}'.")
+    plt.savefig("task5_speedup_dashboard.png", bbox_inches='tight')
+    print("\nSaved plot to task5_speedup_dashboard.png")
     plt.show()
+ 
